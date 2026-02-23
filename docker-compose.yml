@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  web:
+    build: .
+    container_name: ashare-quant-web
+    ports:
+      - "8501:8501"
+    volumes:
+      # 挂载数据目录，确保重启容器后数据不丢失 (如果数据会动态更新)
+      - ./data:/app/data
+      # 开发时挂载代码，方便热更新 (生产环境可去掉)
+      # - ./src:/app/src
+    restart: always
+    environment:
+      - TZ=Asia/Shanghai
