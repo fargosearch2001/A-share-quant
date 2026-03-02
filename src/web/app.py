@@ -19,6 +19,7 @@ if project_root not in sys.path:
 
 from src.config import BacktestConfig, DataConfig, STOCK_POOL, get_stock_display_name
 from src.data.loader import DataLoader
+from src.data.stock_list import get_a_stock_list, search_stocks
 from src.backtest.engine import BacktestEngine
 from src.strategy.monthly_trend_rotation import MonthlyTrendDividendRotation
 from src.strategy.double_ma import DoubleMAStrategy
@@ -58,18 +59,16 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# --- 数据加载 (缓存) ---
-@st.cache_resource
-def get_data_loader():
+# --- 数据加载 (支持动态股票池) ---
+# 由于需要支持用户动态添加股票，不使用缓存
+def get_data_loader(stock_pool: list):
     """
-    初始化并加载数据 (缓存结果，避免重复加载)
+    初始化并加载数据
     """
     data_config = DataConfig()
     loader = DataLoader(data_config)
-    # 这里可以添加一个进度条，但在 cache 函数内部比较难控制
-    # 简单起见，直接加载
-    print("Web: Loading data...")
-    loader.load_all(STOCK_POOL)
+    print(f"Web: Loading data for {len(stock_pool)} stocks...")
+    loader.load_all(stock_pool)
     return loader
 
 # --- 侧边栏配置 ---
@@ -79,14 +78,32 @@ with st.sidebar:
     # 1. 股票池
     st.subheader("股票池")
     
+    # 初始化 session_state 来管理可编辑的股票池
+    if 'editable_stock_pool' not in st.session_state:
+        st.session_state.editable_stock_pool = list(STOCK_POOL)
+    
+    # 尝试加载A股股票列表用于搜索
+    try:
+        all_stocks = get_a_stock_list()
+        # 合并初始股票池和已添加的股票
+        for code in st.session_state.editable_stock_pool:
+            if code not in all_stocks:
+                all_stocks[code] = code.split('.')[0]  # 如果不在列表中，使用代码作为名称
+    except Exception:
+        all_stocks = {code: code.split('.')[0] for code in st.session_state.editable_stock_pool}
+    
     # 创建带名称的选项列表（用于显示）
-    stock_options_display = [get_stock_display_name(code) for code in STOCK_POOL]
+    stock_options_display = [get_stock_display_name(code) if code in [c for c in STOCK_POOL] else f"{code.split('.')[0]} - {all_stocks.get(code, code.split('.')[0])}" for code in st.session_state.editable_stock_pool]
+    
     # 创建代码到显示名称的映射
-    code_to_display = {code: get_stock_display_name(code) for code in STOCK_POOL}
-    display_to_code = {get_stock_display_name(code): code for code in STOCK_POOL}
+    def get_display_name(code):
+        if code in STOCK_POOL:
+            return get_stock_display_name(code)
+        name = all_stocks.get(code, code.split('.')[0])
+        return f"{code.split('.')[0]} - {name}"
     
     # 默认选中的显示名称
-    default_display = [get_stock_display_name(code) for code in STOCK_POOL]
+    default_display = [get_display_name(code) for code in st.session_state.editable_stock_pool]
     
     selected_stocks_display = st.multiselect(
         "选择回测股票",
@@ -96,7 +113,57 @@ with st.sidebar:
     )
     
     # 将显示名称转换回股票代码
-    selected_stocks = [display_to_code[display] for display in selected_stocks_display]
+    # 从 editable_stock_pool 中选择
+    selected_stocks = []
+    for display in selected_stocks_display:
+        # 尝试匹配
+        for code in st.session_state.editable_stock_pool:
+            if get_display_name(code) == display:
+                selected_stocks.append(code)
+                break
+    
+    # --- 搜索添加股票区域 ---
+    st.markdown("---")
+    st.markdown("**➕ 添加股票**")
+    
+    # 搜索框
+    search_keyword = st.text_input(
+        "搜索股票（代码或名称）",
+        placeholder="如: 600519 或 茅台",
+        key="stock_search"
+    )
+    
+    if search_keyword:
+        try:
+            search_results = search_stocks(search_keyword)
+            if search_results:
+                # 创建搜索结果的下拉选项
+                search_options = [r['display'] for r in search_results]
+                selected_result = st.selectbox(
+                    "选择股票",
+                    options=search_options,
+                    key="search_result_select"
+                )
+                
+                # 添加按钮
+                if st.button("添加到股票池", key="add_stock_btn"):
+                    # 找到对应的股票代码
+                    for r in search_results:
+                        if r['display'] == selected_result:
+                            if r['code'] not in st.session_state.editable_stock_pool:
+                                st.session_state.editable_stock_pool.append(r['code'])
+                                st.success(f"已添加: {r['display']}")
+                                st.rerun()
+                            else:
+                                st.warning("该股票已在股票池中")
+                            break
+            else:
+                st.info("未找到匹配的股票")
+        except Exception as e:
+            st.error(f"搜索失败: {e}")
+    
+    # 显示已添加的股票数量
+    st.caption(f"当前股票池: {len(st.session_state.editable_stock_pool)} 只股票")
     
     # 2. 策略选择
     st.subheader("策略配置")
@@ -357,7 +424,7 @@ if run_btn:
         
     # 1. 获取数据
     with st.spinner("正在加载数据与初始化策略..."):
-        loader = get_data_loader()
+        loader = get_data_loader(selected_stocks)
         
         # 2. 初始化配置
         backtest_config = BacktestConfig(
