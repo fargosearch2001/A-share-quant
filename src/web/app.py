@@ -17,11 +17,12 @@ project_root = os.path.dirname(os.path.dirname(current_dir))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-from src.config import BacktestConfig, DataConfig, STOCK_POOL
+from src.config import BacktestConfig, DataConfig, STOCK_POOL, get_stock_display_name
 from src.data.loader import DataLoader
 from src.backtest.engine import BacktestEngine
 from src.strategy.monthly_trend_rotation import MonthlyTrendDividendRotation
 from src.strategy.double_ma import DoubleMAStrategy
+from src.strategy.combined import CombinedStrategy
 from src.reporting.metrics import compute_metrics
 
 
@@ -77,27 +78,253 @@ with st.sidebar:
     
     # 1. 股票池
     st.subheader("股票池")
-    selected_stocks = st.multiselect(
+    
+    # 创建带名称的选项列表（用于显示）
+    stock_options_display = [get_stock_display_name(code) for code in STOCK_POOL]
+    # 创建代码到显示名称的映射
+    code_to_display = {code: get_stock_display_name(code) for code in STOCK_POOL}
+    display_to_code = {get_stock_display_name(code): code for code in STOCK_POOL}
+    
+    # 默认选中的显示名称
+    default_display = [get_stock_display_name(code) for code in STOCK_POOL]
+    
+    selected_stocks_display = st.multiselect(
         "选择回测股票",
-        options=STOCK_POOL,
-        default=STOCK_POOL,
-        help="默认加载配置文件中的白马股池"
+        options=stock_options_display,
+        default=default_display,
+        help="默认加载配置文件中的白马股池，显示格式：代码 - 股票名称"
     )
+    
+    # 将显示名称转换回股票代码
+    selected_stocks = [display_to_code[display] for display in selected_stocks_display]
     
     # 2. 策略选择
     st.subheader("策略配置")
-    strategy_name = st.selectbox(
-        "选择策略",
-        options=["月线趋势与估值轮动", "双均线策略 (20/60)"],
-        index=0
+    
+    # 策略模式选择
+    strategy_mode = st.radio(
+        "策略模式",
+        ["单一策略", "组合策略（分仓管理）"],
+        horizontal=True,
+        help="组合策略：同时运行两个策略，各自管理分配的资金"
     )
+    
+    # 策略选项映射
+    STRATEGY_OPTIONS = {
+        "月线趋势与估值轮动": "trend",
+        "双均线策略 (20/60)": "ma"
+    }
+    
+    # 根据模式选择策略
+    if strategy_mode == "单一策略":
+        strategy_name = st.selectbox(
+            "选择策略",
+            options=["月线趋势与估值轮动", "双均线策略 (20/60)"],
+            index=0
+        )
+    else:
+        # 组合策略模式
+        st.markdown("---")
+        st.markdown("**📊 组合策略配置**")
+        
+        col_a, col_b = st.columns(2)
+        
+        with col_a:
+            st.markdown("### 策略 A")
+            strategy_a_name = st.selectbox(
+                "策略A",
+                options=["月线趋势与估值轮动", "双均线策略 (20/60)"],
+                index=0,
+                key="strategy_a"
+            )
+            fund_ratio_a = st.slider(
+                "策略A资金比例",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.5,
+                step=0.1,
+                key="fund_a",
+                help="策略A占总资金的比例，设为0可禁用该策略"
+            )
+            st.caption(f"💰 资金占比: {fund_ratio_a:.0%}")
+        
+        with col_b:
+            st.markdown("### 策略 B")
+            strategy_b_name = st.selectbox(
+                "策略B",
+                options=["月线趋势与估值轮动", "双均线策略 (20/60)"],
+                index=1,
+                key="strategy_b"
+            )
+            # 智能计算：如果A为0则B为100%，否则B = 1 - A
+            if fund_ratio_a >= 1.0:
+                fund_ratio_b = 0.0
+            elif fund_ratio_a <= 0.0:
+                fund_ratio_b = 1.0
+            else:
+                fund_ratio_b = 1.0 - fund_ratio_a
+            st.caption(f"💰 资金占比: {fund_ratio_b:.0%}")
+        
+        # 验证
+        if fund_ratio_a == 0 and fund_ratio_b == 0:
+            st.error("❌ 错误：两个策略的资金占比不能同时为0！")
+            st.stop()
+        if strategy_a_name == strategy_b_name and fund_ratio_a > 0 and fund_ratio_b > 0:
+            st.warning("⚠️ 注意：两个策略相同，会产生重复信号")
+        
+        # 策略模式存储，用于后续初始化
+        strategy_name = "组合策略"
     
     # 策略参数动态展示
     strategy_params = {}
-    if strategy_name == "月线趋势与估值轮动":
-        st.info("策略逻辑：月线MA60趋势 + 股息率估值轮动 + 周线辅助")
-        div_threshold = st.number_input("买入股息率阈值", value=0.045, step=0.001, format="%.3f")
-        strategy_params["dividend_buy_threshold"] = div_threshold
+    
+    # 用于存储两个策略的参数
+    strategy_params_a = {}
+    strategy_params_b = {}
+    
+    if strategy_mode == "单一策略":
+        # 原有逻辑
+        if strategy_name == "月线趋势与估值轮动":
+            st.info("策略逻辑：月线MA60趋势 + 股息率估值轮动 + 周线辅助")
+            
+            # 股息率参数
+            div_threshold = st.number_input("买入股息率阈值", value=0.045, step=0.001, format="%.3f", 
+                                           help="股息率需达到此阈值才能买入")
+            strategy_params["dividend_buy_threshold"] = div_threshold
+            
+            # BOLL回踩参数
+            st.subheader("信号A：月线突破后BOLL回踩参数")
+            boll_pullback_lower = st.number_input(
+                "BOLL回踩下限（中轨倍数）", 
+                value=0.95, 
+                min_value=0.80, 
+                max_value=1.00, 
+                step=0.01, 
+                format="%.2f",
+                help="月线收盘价 >= BOLL中轨 × 此值（默认0.95，即中轨的95%）"
+            )
+            boll_pullback_upper = st.number_input(
+                "BOLL回踩上限（中轨倍数）", 
+                value=1.05, 
+                min_value=1.00, 
+                max_value=1.20, 
+                step=0.01, 
+                format="%.2f",
+                help="月线收盘价 <= BOLL中轨 × 此值（默认1.05，即中轨的105%）"
+            )
+            strategy_params["boll_pullback_lower"] = boll_pullback_lower
+            strategy_params["boll_pullback_upper"] = boll_pullback_upper
+            
+            # 显示回踩范围说明
+            st.caption(f"📊 回踩范围：BOLL中轨 × [{boll_pullback_lower:.2f}, {boll_pullback_upper:.2f}]")
+            
+            # 卖出参数
+            st.subheader("卖出策略：股息率阶梯减仓")
+            div_sell_50 = st.number_input(
+                "减仓50%阈值（股息率）", 
+                value=0.0375, 
+                step=0.0005, 
+                format="%.4f",
+                help="股息率低于此值时，卖出一半仓位（默认3.75%）"
+            )
+            div_sell_clear = st.number_input(
+                "清仓阈值（股息率）", 
+                value=0.033, 
+                step=0.0005, 
+                format="%.4f",
+                help="股息率低于此值时，全部清仓（默认3.3%，必须小于减仓阈值）"
+            )
+            
+            # 参数验证提示
+            if div_sell_clear >= div_sell_50:
+                st.error(f"⚠️ 清仓阈值 ({div_sell_clear:.2%}) 必须小于减仓阈值 ({div_sell_50:.2%})")
+            else:
+                st.success(f"✅ 参数设置正确：清仓阈值 ({div_sell_clear:.2%}) < 减仓阈值 ({div_sell_50:.2%})")
+            
+            strategy_params["dividend_sell_threshold_50"] = div_sell_50
+            strategy_params["dividend_sell_threshold_clear"] = div_sell_clear
+            
+            # 显示卖出策略说明
+            st.caption(f"📉 卖出逻辑：DY < {div_sell_50:.2%} 减仓50% | DY < {div_sell_clear:.2%} 清仓")
+        elif strategy_name == "双均线策略 (20/60)":
+            st.info("策略逻辑：短期均线上穿长期均线买入，下穿卖出")
+            short_window = st.number_input("短期窗口", value=20, step=1)
+            long_window = st.number_input("长期窗口", value=60, step=1)
+            strategy_params["short_window"] = short_window
+            strategy_params["long_window"] = long_window
+    
+    # ============ 组合策略参数区域 ============
+    if strategy_mode == "组合策略（分仓管理）":
+        st.markdown("---")
+        st.markdown("### 策略A 参数配置")
+        
+        if strategy_a_name == "月线趋势与估值轮动":
+            with st.expander("策略A：月线趋势与估值轮动 参数", expanded=True):
+                div_threshold_a = st.number_input("策略A - 买入股息率阈值", value=0.045, step=0.001, format="%.3f", 
+                                               key="div_a", help="股息率需达到此阈值才能买入")
+                boll_lower_a = st.number_input("策略A - BOLL回踩下限", value=0.95, min_value=0.80, max_value=1.00, 
+                                              step=0.01, format="%.2f", key="boll_lower_a")
+                boll_upper_a = st.number_input("策略A - BOLL回踩上限", value=1.05, min_value=1.00, max_value=1.20, 
+                                              step=0.01, format="%.2f", key="boll_upper_a")
+                div_sell_50_a = st.number_input("策略A - 减仓50%阈值", value=0.0375, step=0.0005, format="%.4f", key="div_sell_50_a")
+                div_sell_clear_a = st.number_input("策略A - 清仓阈值", value=0.033, step=0.0005, format="%.4f", key="div_sell_clear_a")
+                
+                strategy_params_a = {
+                    "name": "MonthlyTrendDividendRotation",
+                    "dividend_buy_threshold": div_threshold_a,
+                    "boll_pullback_lower": boll_lower_a,
+                    "boll_pullback_upper": boll_upper_a,
+                    "dividend_sell_threshold_50": div_sell_50_a,
+                    "dividend_sell_threshold_clear": div_sell_clear_a
+                }
+        else:  # 双均线
+            with st.expander("策略A：双均线策略 参数", expanded=True):
+                short_a = st.number_input("策略A - 短期窗口", value=20, step=1, key="short_a")
+                long_a = st.number_input("策略A - 长期窗口", value=60, step=1, key="long_a")
+                strategy_params_a = {
+                    "name": "DoubleMAStrategy",
+                    "short_window": short_a,
+                    "long_window": long_a
+                }
+        
+        st.markdown("### 策略B 参数配置")
+        
+        if strategy_b_name == "月线趋势与估值轮动":
+            with st.expander("策略B：月线趋势与估值轮动 参数", expanded=True):
+                div_threshold_b = st.number_input("策略B - 买入股息率阈值", value=0.045, step=0.001, format="%.3f", 
+                                               key="div_b", help="股息率需达到此阈值才能买入")
+                boll_lower_b = st.number_input("策略B - BOLL回踩下限", value=0.95, min_value=0.80, max_value=1.00, 
+                                              step=0.01, format="%.2f", key="boll_lower_b")
+                boll_upper_b = st.number_input("策略B - BOLL回踩上限", value=1.05, min_value=1.00, max_value=1.20, 
+                                              step=0.01, format="%.2f", key="boll_upper_b")
+                div_sell_50_b = st.number_input("策略B - 减仓50%阈值", value=0.0375, step=0.0005, format="%.4f", key="div_sell_50_b")
+                div_sell_clear_b = st.number_input("策略B - 清仓阈值", value=0.033, step=0.0005, format="%.4f", key="div_sell_clear_b")
+                
+                strategy_params_b = {
+                    "name": "MonthlyTrendDividendRotation",
+                    "dividend_buy_threshold": div_threshold_b,
+                    "boll_pullback_lower": boll_lower_b,
+                    "boll_pullback_upper": boll_upper_b,
+                    "dividend_sell_threshold_50": div_sell_50_b,
+                    "dividend_sell_threshold_clear": div_sell_clear_b
+                }
+        else:  # 双均线
+            with st.expander("策略B：双均线策略 参数", expanded=True):
+                short_b = st.number_input("策略B - 短期窗口", value=20, step=1, key="short_b")
+                long_b = st.number_input("策略B - 长期窗口", value=60, step=1, key="long_b")
+                strategy_params_b = {
+                    "name": "DoubleMAStrategy",
+                    "short_window": short_b,
+                    "long_window": long_b
+                }
+        
+        # 显示资金分配摘要
+        st.markdown("---")
+        st.markdown(f"""
+        ### 💰 资金分配摘要
+        - **策略A ({strategy_a_name})**: {fund_ratio_a:.0%}
+        - **策略B ({strategy_b_name})**: {fund_ratio_b:.0%}
+        """)
     elif strategy_name == "双均线策略 (20/60)":
         st.info("策略逻辑：短期均线上穿长期均线买入，下穿卖出")
         short_window = st.number_input("短期窗口", value=20, step=1)
@@ -112,8 +339,11 @@ with st.sidebar:
     
     # 4. 时间范围
     st.subheader("回测区间")
-    start_date = st.date_input("开始日期", value=date(2018, 1, 1))
-    end_date = st.date_input("结束日期", value=date.today())
+    # 默认回测最近5年
+    default_start = date(2019, 1, 1)
+    default_end = date(2024, 12, 31)
+    start_date = st.date_input("开始日期", value=default_start)
+    end_date = st.date_input("结束日期", value=default_end)
     
     run_btn = st.button("开始回测", type="primary", use_container_width=True)
 
@@ -137,14 +367,59 @@ if run_btn:
         )
         
         # 3. 初始化策略
-        if strategy_name == "月线趋势与估值轮动":
-            strategy = MonthlyTrendDividendRotation(
-                dividend_buy_threshold=strategy_params["dividend_buy_threshold"]
-            )
+        if strategy_mode == "单一策略":
+            # 单一策略逻辑（原有）
+            if strategy_name == "月线趋势与估值轮动":
+                strategy = MonthlyTrendDividendRotation(
+                    dividend_buy_threshold=strategy_params["dividend_buy_threshold"],
+                    dividend_sell_threshold_50=strategy_params.get("dividend_sell_threshold_50", 0.0375),
+                    dividend_sell_threshold_clear=strategy_params.get("dividend_sell_threshold_clear", 0.033),
+                    boll_pullback_lower=strategy_params.get("boll_pullback_lower", 0.95),
+                    boll_pullback_upper=strategy_params.get("boll_pullback_upper", 1.05)
+                )
+            else:
+                strategy = DoubleMAStrategy(
+                    short_window=strategy_params["short_window"],
+                    long_window=strategy_params["long_window"]
+                )
         else:
-            strategy = DoubleMAStrategy(
-                short_window=strategy_params["short_window"],
-                long_window=strategy_params["long_window"]
+            # 组合策略逻辑
+            # 创建策略A
+            if strategy_params_a["name"] == "MonthlyTrendDividendRotation":
+                strategy_a = MonthlyTrendDividendRotation(
+                    dividend_buy_threshold=strategy_params_a["dividend_buy_threshold"],
+                    dividend_sell_threshold_50=strategy_params_a.get("dividend_sell_threshold_50", 0.0375),
+                    dividend_sell_threshold_clear=strategy_params_a.get("dividend_sell_threshold_clear", 0.033),
+                    boll_pullback_lower=strategy_params_a.get("boll_pullback_lower", 0.95),
+                    boll_pullback_upper=strategy_params_a.get("boll_pullback_upper", 1.05)
+                )
+            else:
+                strategy_a = DoubleMAStrategy(
+                    short_window=strategy_params_a["short_window"],
+                    long_window=strategy_params_a["long_window"]
+                )
+            
+            # 创建策略B
+            if strategy_params_b["name"] == "MonthlyTrendDividendRotation":
+                strategy_b = MonthlyTrendDividendRotation(
+                    dividend_buy_threshold=strategy_params_b["dividend_buy_threshold"],
+                    dividend_sell_threshold_50=strategy_params_b.get("dividend_sell_threshold_50", 0.0375),
+                    dividend_sell_threshold_clear=strategy_params_b.get("dividend_sell_threshold_clear", 0.033),
+                    boll_pullback_lower=strategy_params_b.get("boll_pullback_lower", 0.95),
+                    boll_pullback_upper=strategy_params_b.get("boll_pullback_upper", 1.05)
+                )
+            else:
+                strategy_b = DoubleMAStrategy(
+                    short_window=strategy_params_b["short_window"],
+                    long_window=strategy_params_b["long_window"]
+                )
+            
+            # 创建组合策略
+            strategy = CombinedStrategy(
+                strategy_a=strategy_a,
+                strategy_b=strategy_b,
+                fund_ratio_a=fund_ratio_a,
+                fund_ratio_b=fund_ratio_b
             )
             
         # 4. 运行回测

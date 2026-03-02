@@ -20,6 +20,8 @@ def main():
     parser = argparse.ArgumentParser(description="A-Share Quantitative Backtest")
     parser.add_argument("--strategy", type=str, default="trend", 
                         choices=["trend", "ma"], help="Choose strategy: trend (Monthly Trend Rotation) or ma (Double MA)")
+    parser.add_argument("--stocks", type=int, default=None,
+                        help="Number of stocks to load (default: all)")
     args = parser.parse_args()
 
     # 1. 配置
@@ -33,9 +35,14 @@ def main():
     # 2. 数据加载
     loader = DataLoader(data_config)
     print("Loading data...")
-    # 为了演示，只取前 5 只股票以节省时间，实际运行时可取全部
-    # loader.load_all(STOCK_POOL[:5]) 
-    loader.load_all(STOCK_POOL)
+    
+    # 选择要加载的股票
+    stocks_to_load = STOCK_POOL
+    if args.stocks:
+        stocks_to_load = STOCK_POOL[:args.stocks]
+        print(f"Loading {len(stocks_to_load)} stocks (limited by --stocks argument)")
+    
+    loader.load_all(stocks_to_load)
     
     # 3. 策略选择
     if args.strategy == "trend":

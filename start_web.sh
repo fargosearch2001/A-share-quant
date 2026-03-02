@@ -15,4 +15,4 @@ if [ $? -ne 0 ]; then
 fi
 
 echo "=== 启动回测系统界面... ==="
-streamlit run src/web/app.py
+streamlit run src/web/app.py --server.port 8501
