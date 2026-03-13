@@ -40,3 +40,5 @@ Thumbs.db
 # Project specific
 data/*.csv
 data/cache/
+.pydeps/
+.vendor/

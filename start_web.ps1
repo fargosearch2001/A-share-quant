@@ -14,4 +14,4 @@ Write-Host "按 Ctrl+C 停止服务" -ForegroundColor Yellow
 Write-Host ""
 
 # 启动 Streamlit，指定固定端口 8501
-.venv\Scripts\python.exe -m streamlit run src/web/app.py --server.port 8501 --server.headless true
+venv\Scripts\python.exe -m streamlit run src/web/app.py --server.port 8501 --server.headless true

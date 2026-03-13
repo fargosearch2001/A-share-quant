@@ -5,6 +5,7 @@
 """
 
 import os
+import sys
 import time
 import pandas as pd
 import numpy as np
@@ -20,6 +21,9 @@ try:
 except ImportError:
     AKSHARE_AVAILABLE = False
     print("警告: akshare 未安装，将跳过该数据源")
+if AKSHARE_AVAILABLE and sys.version_info >= (3, 13):
+    AKSHARE_AVAILABLE = False
+    print("警告: 当前 Python 版本与 akshare 不兼容，已禁用 akshare 数据源")
 
 try:
     import baostock as bs
@@ -260,8 +264,8 @@ class DataLoader:
                     fail_count += 1
                     continue
                 
-                # 请求成功后添加延迟，避免请求过快
-                time.sleep(0.3)
+                if self.config.request_delay_seconds > 0:
+                    time.sleep(self.config.request_delay_seconds)
                     
                 # 重命名列（统一列名格式）
                 if "日期" in df.columns:
@@ -312,7 +316,8 @@ class DataLoader:
                             symbol=code,
                             indicator="分红"
                         )
-                        time.sleep(0.3)  # 添加延迟
+                        if self.config.request_delay_seconds > 0:
+                            time.sleep(self.config.request_delay_seconds)
                     except Exception as e:
                         print(f"  Warning: 无法获取 {symbol} 的分红数据: {str(e)[:60]}")
                         div_df = pd.DataFrame(columns=["除权除息日", "派息"])
@@ -329,27 +334,25 @@ class DataLoader:
                     div_df = pd.DataFrame(columns=["除权除息日", "dividend_per_share"])
                 self.dividend_data[symbol] = div_df
                 
-                # 计算每日的滚动年度分红 (Trailing 12M Dividends)
-                # 优化: 创建连续日历索引以包含非交易日的分红
+                mode = getattr(self.config, "dividend_yield_mode", "static")
                 if not div_df.empty and "除权除息日" in div_df.columns and "dividend_per_share" in div_df.columns:
-                    full_idx = pd.date_range(start=df.index.min(), end=df.index.max())
-                    daily_div_full = pd.Series(0.0, index=full_idx)
-                    
-                    for _, row in div_df.iterrows():
-                        d_date = row["除权除息日"]
-                        if pd.notna(d_date) and d_date >= full_idx.min() and d_date <= full_idx.max():
-                            daily_div_full.loc[d_date] += row["dividend_per_share"]
-                    
-                    # 在连续日历上计算滚动和
-                    rolling_div_full = daily_div_full.rolling(window='365D', min_periods=1).sum()
-                    
-                    # 对齐回交易日索引
-                    rolling_div = rolling_div_full.reindex(df.index, method='ffill')
-                    
-                    # 计算股息率 = 滚动年度分红 / 当前收盘价
-                    df["dividend_yield"] = rolling_div / df["close"]
+                    div_df["year"] = div_df["除权除息日"].dt.year
+                    year_sum = div_df.groupby("year")["dividend_per_share"].sum()
+                    if mode == "static":
+                        prev_year = pd.Series(df.index.year - 1, index=df.index)
+                        static_div = prev_year.map(lambda y: year_sum.get(y, 0.0)).astype(float)
+                        df["dividend_yield"] = static_div / df["close"]
+                    else:
+                        full_idx = pd.date_range(start=df.index.min(), end=df.index.max())
+                        daily_div_full = pd.Series(0.0, index=full_idx)
+                        for _, row in div_df.iterrows():
+                            d_date = row["除权除息日"]
+                            if pd.notna(d_date) and d_date >= full_idx.min() and d_date <= full_idx.max():
+                                daily_div_full.loc[d_date] += row["dividend_per_share"]
+                        rolling_div_full = daily_div_full.rolling(window='365D', min_periods=1).sum()
+                        rolling_div = rolling_div_full.reindex(df.index, method='ffill')
+                        df["dividend_yield"] = rolling_div / df["close"]
                 else:
-                    # 如果没有分红数据，股息率为 0
                     df["dividend_yield"] = 0.0
                 
                 self.daily_data[symbol] = df

@@ -4,3 +4,7 @@ akshare
 baostock
 streamlit
 plotly
+pandas_ta @ git+https://github.com/twopirllc/pandas-ta
+backtrader
+vnpy
+pyfolio

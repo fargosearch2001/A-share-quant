@@ -23,6 +23,8 @@ class DataConfig:
     """
     csv_path: str = "data"           # 数据文件目录
     date_format: str = "%Y-%m-%d"    # 日期格式
+    request_delay_seconds: float = 0.3
+    dividend_yield_mode: str = "static"
 
 
 # 策略 Demo 中的固定股票池
